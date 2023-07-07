@@ -1,0 +1,305 @@
+version: '2'
+
+networks:
+  frontend:
+    driver: ${NETWORKS_DRIVER}
+  backend:
+    driver: ${NETWORKS_DRIVER}
+  static:
+    ipam:
+      config:
+        - subnet: 172.26.0.0/23 # In order to specify static IPs, we must explicitly declare subnet.
+          ip_range: 172.26.0.0/24 # Range for dynamic IPs. We'll make sure to assign static IPs outside this range.
+
+volumes:
+  mysql:
+    driver: ${VOLUMES_DRIVER}
+  redis:
+    driver: ${VOLUMES_DRIVER}
+  minio:
+    driver: ${VOLUMES_DRIVER}
+  docker-in-docker:
+    driver: ${VOLUMES_DRIVER}
+
+services:
+  dnsmasq:
+    image: strm/dnsmasq
+    volumes:
+      - ./dnsmasq.conf:/etc/dnsmasq.conf
+    ports:
+      - 13553:53/udp
+    cap_add:
+      - NET_ADMIN
+    networks:
+      static:
+        ipv4_address: 172.26.1.1 # Static IP here makes it possible to point other containers' dns here.
+
+  ### Docker-in-Docker ################################################
+  docker-in-docker:
+    image: docker:19.03-dind
+    environment:
+      DOCKER_TLS_SAN: DNS:docker-in-docker
+    privileged: true
+    volumes:
+      - ${HOST_MACHINE_CODE_PATH}:${CONTAINER_PATH}${CONTAINER_MOUNT_FLAG}
+    expose:
+      - 2375
+    networks:
+      - backend
+
+  ### NGINX Server #########################################
+  nginx:
+    build:
+      context: ./nginx
+      args:
+        - http_proxy
+        - https_proxy
+        - no_proxy
+    volumes:
+      - ${HOST_MACHINE_CODE_PATH}:${CONTAINER_PATH}${CONTAINER_MOUNT_FLAG}
+      - ${NGINX_HOST_LOG_PATH}:/var/log/nginx
+      - ${NGINX_SITES_PATH}:/etc/nginx/sites-available
+      - ${NGINX_SSL_PATH}:/etc/nginx/ssl
+    ports:
+      - "${NGINX_HOST_HTTP_PORT}:80"
+      - "${NGINX_HOST_HTTPS_PORT}:443"
+      - "24679:24679"
+    depends_on:
+      - dnsmasq
+      - php-fpm-8.1
+      - php-fpm-8.2
+    networks:
+      static:
+        ipv4_address: 172.26.1.2
+      frontend: null
+      backend: null
+
+  ### MySQL ################################################
+  mysql:
+    build:
+      context: ./mysql
+      args:
+        - MYSQL_VERSION=${MYSQL_VERSION}
+    environment:
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - TZ=${WORKSPACE_TIMEZONE}
+    volumes:
+      - ${DATA_PATH_HOST}/mysql:/var/lib/mysql
+      - ${MYSQL_ENTRYPOINT_INITDB}:/docker-entrypoint-initdb.d
+    ports:
+      - "${MYSQL_PORT}:3306"
+    networks:
+      - backend
+
+  # PHP-FPM 8.1
+  php-fpm-8.1:
+    build:
+      context: ./php-fpm-8.1
+    volumes:
+      - ${HOST_MACHINE_CODE_PATH}:${CONTAINER_PATH}${CONTAINER_MOUNT_FLAG}
+    ports:
+      - "9003:9003"
+    expose:
+      - "9000"
+    depends_on:
+      - dnsmasq
+    environment:
+      - DOCKER_HOST=tcp://docker-in-docker:2376
+    networks:
+      frontend: null
+      backend: null
+      static:
+        ipv4_address: 172.26.1.81
+    dns:
+      - 172.26.1.1
+
+  # PHP-FPM 8.2
+  php-fpm-8.2:
+    build:
+      context: ./php-fpm-8.2
+    volumes:
+      - ${HOST_MACHINE_CODE_PATH}:${CONTAINER_PATH}${CONTAINER_MOUNT_FLAG}
+    ports:
+      - "9004:9004"
+    expose:
+      - "9000"
+    depends_on:
+      - dnsmasq
+    environment:
+      - DOCKER_HOST=tcp://docker-in-docker:2376
+    networks:
+      frontend: null
+      backend: null
+      static:
+        ipv4_address: 172.26.1.82
+    dns:
+      - 172.26.1.1
+
+  # PHP-CLI 8.1
+  php-cli-8.1:
+    build:
+      context: ./php-cli-8.1
+    volumes:
+      - ${HOST_MACHINE_CODE_PATH}:${CONTAINER_PATH}${CONTAINER_MOUNT_FLAG}
+    ports:
+      - "2222:22"
+    depends_on:
+      - dnsmasq
+    tty: true
+    links:
+      - docker-in-docker
+    networks:
+      frontend: null
+      backend: null
+      static:
+        ipv4_address: 172.26.1.51
+    dns:
+      - 172.26.1.1
+
+  # PHP-CLI 8.2
+  php-cli-8.2:
+    build:
+      context: ./php-cli-8.2
+    volumes:
+      - ${HOST_MACHINE_CODE_PATH}:${CONTAINER_PATH}${CONTAINER_MOUNT_FLAG}
+    ports:
+      - "2223:22"
+    depends_on:
+      - dnsmasq
+    tty: true
+    links:
+      - docker-in-docker
+    networks:
+      frontend: null
+      backend: null
+      static:
+        ipv4_address: 172.26.1.52
+    dns:
+      - 172.26.1.1
+
+  ### node #########################################
+  node:
+    build:
+      context: ./node
+      args:
+        - PUID=${NODE_PUID}
+        - PGID=${NODE_PGID}
+        - LOCALE=${NODE_LOCALE}
+        - INSTALL_DOCKER_CLIENT=${NODE_INSTALL_DOCKER_CLIENT}
+        - NODE_VERSION=${NODE_VERSION}
+        - http_proxy
+        - https_proxy
+        - no_proxy
+    volumes:
+      - ${HOST_MACHINE_CODE_PATH}:${CONTAINER_PATH}${CONTAINER_MOUNT_FLAG}
+    expose:
+      - "9560"
+      - "4000"
+    ports:
+      - "24678:24678"
+    extra_hosts:
+      - "dockerhost:${DOCKER_HOST_IP}"
+    environment:
+      - DOCKER_HOST=tcp://docker-in-docker:2376
+    networks:
+      - static
+      - backend
+    links:
+      - docker-in-docker
+    dns:
+      - 172.26.1.1
+
+  ### Redis ################################################
+  redis:
+    build: ./redis
+    volumes:
+      - ${DATA_PATH_HOST}/redis:/data
+    ports:
+      - "${REDIS_PORT}:6379"
+    networks:
+      - backend
+
+  ### Hashicorp Vault ##########################################
+  vault:
+    build: ./vault
+    volumes:
+      - ./vault/policies:/etc/vault.d/policies
+    ports:
+      - "8200:8200"
+      - "8201:8201"
+    environment:
+      - VAULT_ADDR=http://0.0.0.0:8200
+      - VAULT_API_ADDR=http://0.0.0.0:8200
+      - VAULT_ADDRESS=http://0.0.0.0:8200
+    cap_add:
+      - IPC_LOCK
+    networks:
+      - backend
+      - frontend
+
+    ## Minio ################################################
+  minio:
+    build: ./minio
+    volumes:
+      - ${DATA_PATH_HOST}/minio/data:/export
+      - ${DATA_PATH_HOST}/minio/config:/root/.minio
+    ports:
+      - "${MINIO_PORT}:9000"
+      - "${MINIO_CONSOLE_PORT}:9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    networks:
+      - frontend
+      - backend
+
+  ### Whoogle search ################################################
+  whoogle:
+    image: ${WHOOGLE_IMAGE:-benbusby/whoogle-search}
+    container_name: whoogle
+    restart: unless-stopped
+    # pids_limit: 50
+    mem_limit: 256mb
+    memswap_limit: 256mb
+    # user debian-tor from tor package
+    user: whoogle
+    security_opt:
+      - no-new-privileges
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /config/:size=10M,uid=927,gid=927,mode=1700
+      - /var/lib/tor/:size=15M,uid=927,gid=927,mode=1700
+      - /run/tor/:size=1M,uid=927,gid=927,mode=1700
+      #environment: # Uncomment to configure environment variables
+      # Basic auth configuration, uncomment to enable
+      #- WHOOGLE_USER=<auth username>
+      #- WHOOGLE_PASS=<auth password>
+      # Proxy configuration, uncomment to enable
+      #- WHOOGLE_PROXY_USER=<proxy username>
+      #- WHOOGLE_PROXY_PASS=<proxy password>
+      #- WHOOGLE_PROXY_TYPE=<proxy type (http|https|socks4|socks5)
+      #- WHOOGLE_PROXY_LOC=<proxy host/ip>
+      # Site alternative configurations, uncomment to enable
+      # Note: If not set, the feature will still be available
+      # with default values.
+      #- WHOOGLE_ALT_TW=farside.link/nitter
+      #- WHOOGLE_ALT_YT=farside.link/invidious
+      #- WHOOGLE_ALT_IG=farside.link/bibliogram/u
+      #- WHOOGLE_ALT_RD=farside.link/libreddit
+      #- WHOOGLE_ALT_MD=farside.link/scribe
+      #- WHOOGLE_ALT_TL=farside.link/lingva
+      #- WHOOGLE_ALT_IMG=farside.link/rimgo
+      #- WHOOGLE_ALT_WIKI=farside.link/wikiless
+      #- WHOOGLE_ALT_IMDB=farside.link/libremdb
+      #- WHOOGLE_ALT_QUORA=farside.link/quetre
+      #env_file: # Alternatively, load variables from whoogle.env
+      #- whoogle.env
+    ports:
+      - "5001:5000"
+    networks:
+      - backend
+      - frontend
