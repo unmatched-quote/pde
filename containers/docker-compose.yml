@@ -138,6 +138,28 @@ services:
     dns:
       - 172.26.1.1
 
+  # PHP-FPM 8.3
+  php-fpm-8.3:
+    build:
+      context: ./php-fpm-8.3
+    volumes:
+      - ${HOST_MACHINE_CODE_PATH}:${CONTAINER_PATH}${CONTAINER_MOUNT_FLAG}
+    ports:
+      - "9004:9005"
+    expose:
+      - "9000"
+    depends_on:
+      - dnsmasq
+    environment:
+      - DOCKER_HOST=tcp://docker-in-docker:2376
+    networks:
+      frontend: null
+      backend: null
+      static:
+        ipv4_address: 172.26.1.83
+    dns:
+      - 172.26.1.1
+
   # PHP-CLI 8.1
   php-cli-8.1:
     build:
@@ -177,6 +199,27 @@ services:
       backend: null
       static:
         ipv4_address: 172.26.1.52
+    dns:
+      - 172.26.1.1
+
+  # PHP-CLI 8.3
+  php-cli-8.3:
+    build:
+      context: ./php-cli-8.3
+    volumes:
+      - ${HOST_MACHINE_CODE_PATH}:${CONTAINER_PATH}${CONTAINER_MOUNT_FLAG}
+    ports:
+      - "2233:22"
+    depends_on:
+      - dnsmasq
+    tty: true
+    links:
+      - docker-in-docker
+    networks:
+      frontend: null
+      backend: null
+      static:
+        ipv4_address: 172.26.1.73
     dns:
       - 172.26.1.1
 
@@ -240,9 +283,10 @@ services:
       - backend
       - frontend
 
-    ## Minio ################################################
+  ## Minio ################################################
   minio:
-    build: ./minio
+    build:
+      context: ./golang
     volumes:
       - ${DATA_PATH_HOST}/minio/data:/export
       - ${DATA_PATH_HOST}/minio/config:/root/.minio
@@ -255,6 +299,26 @@ services:
     networks:
       - frontend
       - backend
+
+  ## Golang ################################################
+  golang:
+    build: ./golang
+    volumes:
+      - ${HOST_MACHINE_CODE_PATH}:${CONTAINER_PATH}${CONTAINER_MOUNT_FLAG}
+    ports:
+      - "2229:22"
+    depends_on:
+      - dnsmasq
+    tty: true
+    links:
+      - docker-in-docker
+    networks:
+      frontend: null
+      backend: null
+      static:
+        ipv4_address: 172.26.1.44
+    dns:
+      - 172.26.1.1
 
   ### Whoogle search ################################################
   whoogle:
